@@ -28,19 +28,16 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Initialize Firebase
-if not firebase_admin._apps:
-    cred = credentials.Certificate({
-        "type": "service_account",
-        "project_id": os.environ['FIREBASE_PROJECT_ID'],
-        "private_key_id": "",
-        "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7VJTUt9Us8cKB\n-----END PRIVATE KEY-----\n",
-        "client_email": f"firebase-adminsdk@{os.environ['FIREBASE_PROJECT_ID']}.iam.gserviceaccount.com",
-        "client_id": "",
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token"
-    })
-    firebase_admin.initialize_app(cred)
+# Initialize Firebase (Simple setup for demo)
+# Firebase integration will be implemented separately
+firebase_db = None
+try:
+    # For production, use proper Firebase credentials
+    # firebase_admin.initialize_app()
+    # firebase_db = firestore.client()
+    print("Firebase setup skipped for demo - using MongoDB for data storage")
+except Exception as e:
+    print(f"Firebase initialization failed: {e}")
 
 # Initialize external API clients
 youtube = build('youtube', 'v3', developerKey=os.environ['YOUTUBE_API_KEY'])
