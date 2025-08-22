@@ -51,6 +51,13 @@ api_router = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Test GitHub connection
+try:
+    github_user = github_client.get_user()
+    logger.info(f"GitHub API connected successfully for user: {github_user.login}")
+except Exception as e:
+    logger.error(f"GitHub API connection failed: {e}")
+
 # Data Models
 class SearchQuery(BaseModel):
     query: str
