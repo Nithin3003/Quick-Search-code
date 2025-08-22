@@ -1,15 +1,24 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import asyncio
+import aiohttp
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Dict, Optional, Any
 import uuid
 from datetime import datetime
+import json
 
+# External API clients
+from googleapiclient.discovery import build
+from github import Github
+import requests
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -19,42 +28,326 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
-app = FastAPI()
+# Initialize Firebase
+if not firebase_admin._apps:
+    cred = credentials.Certificate({
+        "type": "service_account",
+        "project_id": os.environ['FIREBASE_PROJECT_ID'],
+        "private_key_id": "",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7VJTUt9Us8cKB\n-----END PRIVATE KEY-----\n",
+        "client_email": f"firebase-adminsdk@{os.environ['FIREBASE_PROJECT_ID']}.iam.gserviceaccount.com",
+        "client_id": "",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token"
+    })
+    firebase_admin.initialize_app(cred)
 
-# Create a router with the /api prefix
+# Initialize external API clients
+youtube = build('youtube', 'v3', developerKey=os.environ['YOUTUBE_API_KEY'])
+github_client = Github(os.environ['GITHUB_TOKEN'])
+
+# Create the main app
+app = FastAPI(title="OmniSearch API", description="Multi-Modal Knowledge Discovery Platform")
 api_router = APIRouter(prefix="/api")
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Define Models
-class StatusCheck(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+# Data Models
+class SearchQuery(BaseModel):
+    query: str
+    content_types: Optional[List[str]] = ["code", "videos", "papers", "datasets"]
+    limit: Optional[int] = 10
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+class SearchResult(BaseModel):
+    id: str
+    title: str
+    description: str
+    url: str
+    thumbnail_url: Optional[str] = None
+    source_type: str  # "code", "video", "paper", "dataset"
+    metadata: Dict[str, Any] = {}
+    relevance_score: float = 0.0
 
-# Add your routes to the router instead of directly to app
+class UniversalSearchResponse(BaseModel):
+    query: str
+    total_results: int
+    results: List[SearchResult]
+    results_by_type: Dict[str, List[SearchResult]]
+
+# External API Services
+class YouTubeService:
+    @staticmethod
+    async def search(query: str, max_results: int = 10) -> List[SearchResult]:
+        try:
+            search_response = youtube.search().list(
+                q=query,
+                part='id,snippet',
+                maxResults=max_results,
+                type='video'
+            ).execute()
+
+            results = []
+            for item in search_response['items']:
+                result = SearchResult(
+                    id=item['id']['videoId'],
+                    title=item['snippet']['title'],
+                    description=item['snippet']['description'][:200] + "...",
+                    url=f"https://www.youtube.com/watch?v={item['id']['videoId']}",
+                    thumbnail_url=item['snippet']['thumbnails']['medium']['url'],
+                    source_type="video",
+                    metadata={
+                        'channel': item['snippet']['channelTitle'],
+                        'published_at': item['snippet']['publishedAt']
+                    }
+                )
+                results.append(result)
+            return results
+        except Exception as e:
+            logger.error(f"YouTube search error: {e}")
+            return []
+
+class GitHubService:
+    @staticmethod
+    async def search(query: str, max_results: int = 10) -> List[SearchResult]:
+        try:
+            repositories = github_client.search_repositories(query=query)
+            results = []
+            
+            for repo in repositories[:max_results]:
+                result = SearchResult(
+                    id=str(repo.id),
+                    title=repo.full_name,
+                    description=repo.description or "No description available",
+                    url=repo.html_url,
+                    source_type="code",
+                    metadata={
+                        'language': repo.language,
+                        'stars': repo.stargazers_count,
+                        'forks': repo.forks_count,
+                        'updated_at': repo.updated_at.isoformat() if repo.updated_at else None
+                    }
+                )
+                results.append(result)
+            return results
+        except Exception as e:
+            logger.error(f"GitHub search error: {e}")
+            return []
+
+class KaggleService:
+    @staticmethod
+    async def search(query: str, max_results: int = 10) -> List[SearchResult]:
+        try:
+            # Use Kaggle API to search datasets
+            url = "https://www.kaggle.com/api/v1/datasets/list"
+            headers = {
+                'Authorization': f'Bearer {os.environ["KAGGLE_KEY"]}'
+            }
+            params = {
+                'search': query,
+                'maxSize': max_results
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        results = []
+                        
+                        for dataset in data:
+                            result = SearchResult(
+                                id=dataset['ref'],
+                                title=dataset['title'],
+                                description=dataset['subtitle'] or "No description available",
+                                url=f"https://www.kaggle.com/datasets/{dataset['ref']}",
+                                source_type="dataset",
+                                metadata={
+                                    'size': dataset.get('totalBytes', 0),
+                                    'files': dataset.get('fileTypes', []),
+                                    'updated_at': dataset.get('lastUpdated')
+                                }
+                            )
+                            results.append(result)
+                        return results
+            return []
+        except Exception as e:
+            logger.error(f"Kaggle search error: {e}")
+            return []
+
+class SemanticScholarService:
+    @staticmethod
+    async def search(query: str, max_results: int = 10) -> List[SearchResult]:
+        try:
+            url = "https://api.semanticscholar.org/graph/v1/paper/search"
+            params = {
+                'query': query,
+                'limit': max_results,
+                'fields': 'paperId,title,abstract,authors,year,citationCount,url'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        results = []
+                        
+                        for paper in data.get('data', []):
+                            authors = [author['name'] for author in paper.get('authors', [])]
+                            result = SearchResult(
+                                id=paper['paperId'],
+                                title=paper['title'],
+                                description=paper.get('abstract', 'No abstract available')[:200] + "...",
+                                url=paper.get('url', f"https://www.semanticscholar.org/paper/{paper['paperId']}"),
+                                source_type="paper",
+                                metadata={
+                                    'authors': authors,
+                                    'year': paper.get('year'),
+                                    'citations': paper.get('citationCount', 0)
+                                }
+                            )
+                            results.append(result)
+                        return results
+            return []
+        except Exception as e:
+            logger.error(f"Semantic Scholar search error: {e}")
+            return []
+
+# Universal Search Orchestrator
+class UniversalSearchOrchestrator:
+    def __init__(self):
+        self.services = {
+            'code': GitHubService,
+            'videos': YouTubeService,
+            'datasets': KaggleService,
+            'papers': SemanticScholarService
+        }
+
+    async def search(self, query: str, content_types: List[str], limit: int = 10) -> UniversalSearchResponse:
+        """Orchestrate search across multiple content types"""
+        tasks = []
+        
+        for content_type in content_types:
+            if content_type in self.services:
+                service = self.services[content_type]
+                task = service.search(query, limit)
+                tasks.append((content_type, task))
+
+        # Execute all searches concurrently
+        results_by_type = {}
+        all_results = []
+
+        for content_type, task in tasks:
+            try:
+                results = await task
+                results_by_type[content_type] = results
+                all_results.extend(results)
+            except Exception as e:
+                logger.error(f"Error searching {content_type}: {e}")
+                results_by_type[content_type] = []
+
+        # Simple relevance scoring (can be enhanced with ML models)
+        for result in all_results:
+            result.relevance_score = self._calculate_relevance(query, result)
+
+        # Sort by relevance
+        all_results.sort(key=lambda x: x.relevance_score, reverse=True)
+
+        return UniversalSearchResponse(
+            query=query,
+            total_results=len(all_results),
+            results=all_results[:limit],
+            results_by_type=results_by_type
+        )
+
+    def _calculate_relevance(self, query: str, result: SearchResult) -> float:
+        """Simple relevance scoring based on keyword matching"""
+        query_terms = query.lower().split()
+        title_score = sum(1 for term in query_terms if term in result.title.lower())
+        desc_score = sum(0.5 for term in query_terms if term in result.description.lower())
+        return (title_score + desc_score) / len(query_terms)
+
+# Initialize orchestrator
+search_orchestrator = UniversalSearchOrchestrator()
+
+# API Endpoints
 @api_router.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"message": "OmniSearch API - Multi-Modal Knowledge Discovery Platform"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.dict()
-    status_obj = StatusCheck(**status_dict)
-    _ = await db.status_checks.insert_one(status_obj.dict())
-    return status_obj
+@api_router.post("/search/universal", response_model=UniversalSearchResponse)
+async def universal_search(search_query: SearchQuery):
+    """Universal search across all content types"""
+    try:
+        response = await search_orchestrator.search(
+            query=search_query.query,
+            content_types=search_query.content_types,
+            limit=search_query.limit
+        )
+        
+        # Cache the search results in Firebase/MongoDB
+        search_record = {
+            "query": search_query.query,
+            "timestamp": datetime.utcnow(),
+            "results_count": response.total_results,
+            "content_types": search_query.content_types
+        }
+        await db.search_history.insert_one(search_record)
+        
+        return response
+    except Exception as e:
+        logger.error(f"Universal search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    status_checks = await db.status_checks.find().to_list(1000)
-    return [StatusCheck(**status_check) for status_check in status_checks]
+@api_router.get("/search/suggestions")
+async def get_search_suggestions(q: str):
+    """Get search suggestions based on query"""
+    try:
+        # Simple suggestions - can be enhanced with ML
+        suggestions = [
+            f"{q} tutorial",
+            f"{q} example",
+            f"{q} documentation",
+            f"{q} implementation",
+            f"{q} research"
+        ]
+        return {"suggestions": suggestions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Include the router in the main app
+@api_router.get("/content/{content_type}/{content_id}")
+async def get_content_details(content_type: str, content_id: str):
+    """Get detailed content information"""
+    try:
+        # This would fetch detailed information about specific content
+        # Implementation depends on the content type
+        return {
+            "id": content_id,
+            "type": content_type,
+            "message": "Detailed content retrieval - to be implemented"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/trending")
+async def get_trending_content():
+    """Get trending/popular content across all types"""
+    try:
+        # Mock trending data - would be populated from analytics
+        trending = {
+            "code": ["FastAPI", "React", "Python", "Machine Learning"],
+            "videos": ["AI Tutorial", "Web Development", "Data Science"],
+            "papers": ["Deep Learning", "Neural Networks", "Computer Vision"], 
+            "datasets": ["COVID-19", "Climate Data", "Financial Markets"]
+        }
+        return {"trending": trending}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Include router in main app
 app.include_router(api_router)
 
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -63,13 +356,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
