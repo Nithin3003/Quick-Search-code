@@ -204,23 +204,31 @@ class SemanticScholarService:
                         data = await response.json()
                         results = []
                         
-                        for paper in data.get('data', []):
-                            authors = [author['name'] for author in paper.get('authors', [])]
-                            result = SearchResult(
-                                id=paper['paperId'],
-                                title=paper['title'],
-                                description=paper.get('abstract', 'No abstract available')[:200] + "...",
-                                url=paper.get('url', f"https://www.semanticscholar.org/paper/{paper['paperId']}"),
-                                source_type="paper",
-                                metadata={
-                                    'authors': authors,
-                                    'year': paper.get('year'),
-                                    'citations': paper.get('citationCount', 0)
-                                }
-                            )
-                            results.append(result)
+                        papers = data.get('data', [])
+                        if papers:
+                            for paper in papers:
+                                if paper and paper.get('title'):  # Ensure paper is not None and has title
+                                    authors = []
+                                    if paper.get('authors'):
+                                        authors = [author.get('name', '') for author in paper.get('authors', []) if author]
+                                    
+                                    result = SearchResult(
+                                        id=paper.get('paperId', ''),
+                                        title=paper.get('title', 'Untitled'),
+                                        description=paper.get('abstract', 'No abstract available')[:200] + "..." if paper.get('abstract') else "No abstract available",
+                                        url=paper.get('url', f"https://www.semanticscholar.org/paper/{paper.get('paperId', '')}"),
+                                        source_type="paper",
+                                        metadata={
+                                            'authors': authors,
+                                            'year': paper.get('year'),
+                                            'citations': paper.get('citationCount', 0)
+                                        }
+                                    )
+                                    results.append(result)
                         return results
-            return []
+                    else:
+                        logger.error(f"Semantic Scholar API error: {response.status}")
+                        return []
         except Exception as e:
             logger.error(f"Semantic Scholar search error: {e}")
             return []
