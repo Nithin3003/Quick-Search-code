@@ -166,11 +166,12 @@ class KaggleService:
                         url=f"https://www.kaggle.com/datasets/{dataset.ref}",
                         source_type="dataset",
                         metadata={
-                            'size': dataset.totalBytes or 0,
-                            'files': dataset.fileTypes or [],
-                            'updated_at': str(dataset.lastUpdated) if dataset.lastUpdated else None,
+                            'size': getattr(dataset, 'totalBytes', 0),
+                            'files': getattr(dataset, 'fileTypes', []),
+                            'updated_at': str(dataset.lastUpdated) if hasattr(dataset, 'lastUpdated') and dataset.lastUpdated else None,
                             'download_count': getattr(dataset, 'downloadCount', 0),
-                            'votes': getattr(dataset, 'voteCount', 0)
+                            'votes': getattr(dataset, 'voteCount', 0),
+                            'creator': getattr(dataset, 'creatorName', 'Unknown')
                         }
                     )
                     results.append(result)
