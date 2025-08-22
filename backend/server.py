@@ -143,38 +143,34 @@ class KaggleService:
     @staticmethod
     async def search(query: str, max_results: int = 10) -> List[SearchResult]:
         try:
-            # Use Kaggle API to search datasets
-            url = "https://www.kaggle.com/api/v1/datasets/list"
-            headers = {
-                'Authorization': f'Bearer {os.environ["KAGGLE_KEY"]}'
-            }
-            params = {
-                'search': query,
-                'maxSize': max_results
-            }
+            # Import kaggle api
+            from kaggle.api.kaggle_api_extended import KaggleApi
             
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        results = []
-                        
-                        for dataset in data:
-                            result = SearchResult(
-                                id=dataset['ref'],
-                                title=dataset['title'],
-                                description=dataset['subtitle'] or "No description available",
-                                url=f"https://www.kaggle.com/datasets/{dataset['ref']}",
-                                source_type="dataset",
-                                metadata={
-                                    'size': dataset.get('totalBytes', 0),
-                                    'files': dataset.get('fileTypes', []),
-                                    'updated_at': dataset.get('lastUpdated')
-                                }
-                            )
-                            results.append(result)
-                        return results
-            return []
+            # Initialize and authenticate Kaggle API
+            api = KaggleApi()
+            api.authenticate()
+            
+            # Search datasets
+            datasets = api.dataset_list(search=query, max_size=max_results)
+            results = []
+            
+            for dataset in datasets:
+                result = SearchResult(
+                    id=dataset.ref,
+                    title=dataset.title,
+                    description=dataset.subtitle or "No description available",
+                    url=f"https://www.kaggle.com/datasets/{dataset.ref}",
+                    source_type="dataset",
+                    metadata={
+                        'size': dataset.totalBytes or 0,
+                        'files': dataset.fileTypes or [],
+                        'updated_at': str(dataset.lastUpdated) if dataset.lastUpdated else None,
+                        'download_count': getattr(dataset, 'downloadCount', 0),
+                        'votes': getattr(dataset, 'voteCount', 0)
+                    }
+                )
+                results.append(result)
+            return results
         except Exception as e:
             logger.error(f"Kaggle search error: {e}")
             return []
