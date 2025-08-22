@@ -143,34 +143,45 @@ class KaggleService:
     @staticmethod
     async def search(query: str, max_results: int = 10) -> List[SearchResult]:
         try:
-            # Import kaggle api
-            from kaggle.api.kaggle_api_extended import KaggleApi
+            import asyncio
+            import concurrent.futures
             
-            # Initialize and authenticate Kaggle API
-            api = KaggleApi()
-            api.authenticate()
+            def sync_kaggle_search():
+                # Import kaggle api
+                from kaggle.api.kaggle_api_extended import KaggleApi
+                
+                # Initialize and authenticate Kaggle API
+                api = KaggleApi()
+                api.authenticate()
+                
+                # Search datasets
+                datasets = api.dataset_list(search=query, max_size=max_results)
+                results = []
+                
+                for dataset in datasets:
+                    result = SearchResult(
+                        id=dataset.ref,
+                        title=dataset.title,
+                        description=dataset.subtitle or "No description available",
+                        url=f"https://www.kaggle.com/datasets/{dataset.ref}",
+                        source_type="dataset",
+                        metadata={
+                            'size': dataset.totalBytes or 0,
+                            'files': dataset.fileTypes or [],
+                            'updated_at': str(dataset.lastUpdated) if dataset.lastUpdated else None,
+                            'download_count': getattr(dataset, 'downloadCount', 0),
+                            'votes': getattr(dataset, 'voteCount', 0)
+                        }
+                    )
+                    results.append(result)
+                return results
             
-            # Search datasets
-            datasets = api.dataset_list(search=query, max_size=max_results)
-            results = []
-            
-            for dataset in datasets:
-                result = SearchResult(
-                    id=dataset.ref,
-                    title=dataset.title,
-                    description=dataset.subtitle or "No description available",
-                    url=f"https://www.kaggle.com/datasets/{dataset.ref}",
-                    source_type="dataset",
-                    metadata={
-                        'size': dataset.totalBytes or 0,
-                        'files': dataset.fileTypes or [],
-                        'updated_at': str(dataset.lastUpdated) if dataset.lastUpdated else None,
-                        'download_count': getattr(dataset, 'downloadCount', 0),
-                        'votes': getattr(dataset, 'voteCount', 0)
-                    }
-                )
-                results.append(result)
-            return results
+            # Run the synchronous Kaggle API call in a thread pool
+            loop = asyncio.get_event_loop()
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                results = await loop.run_in_executor(executor, sync_kaggle_search)
+                return results
+                
         except Exception as e:
             logger.error(f"Kaggle search error: {e}")
             return []
